@@ -1,14 +1,15 @@
 import asyncio
+from email.message import Message
 import os
 import traceback
-import logging
-# 关闭底层的MCP与Agent的通信日志，让终端保持清爽
-# 屏蔽MCP协议的通信包打印
-logging.getLogger("mcp").setLevel(logging.WARNING)
-# 屏蔽HTTP库的请求日志，如果使用了SSE，会有这些信息
-logging.getLogger("httpx").setLevel(logging.WARNING)
-# 屏蔽LangChain的冗余调试信息
-logging.getLogger("langchain").setLevel(logging.WARNING)
+# import logging
+# # 关闭底层的MCP与Agent的通信日志，让终端保持清爽
+# # 屏蔽MCP协议的通信包打印
+# logging.getLogger("mcp").setLevel(logging.WARNING)
+# # 屏蔽HTTP库的请求日志，如果使用了SSE，会有这些信息
+# logging.getLogger("httpx").setLevel(logging.WARNING)
+# # 屏蔽LangChain的冗余调试信息
+# logging.getLogger("langchain").setLevel(logging.WARNING)
 
 from langchain_core.messages.tool import tool_call
 from aioconsole import ainput
@@ -24,6 +25,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from langchain_mcp_adapters.tools import load_mcp_tools
+from urllib3 import response
 
 load_dotenv()
 
@@ -139,12 +141,39 @@ async def main():
                 response = llm_with_tools.invoke(messages)
     
                 return {"messages": [response]}
+            
+            def rag_node(state: MessagesState):
+                RAG_PROMPT = """你是一个严谨的 Kubernetes 文档研究员。
+                你的任务是使用 k8s_doc_retriever 工具查阅官方文档，并针对用户的报错或疑问，提取出最核心的排查步骤或修复建议。
+                注意：
+                1. 你的总结必须简明扼要，控制在 300 字以内。
+                2. 只输出干货，不要说废话。
+                """
+                response = llm.invoke([RAG_PROMPT] + state["messages"])
+                return {"message": [response]}
+            
+            def supervisor_node(state: MessagesState) -> dict:
+                """主管：协调各专家 Agent 的工作"""
+                system = SystemMessage(content="""你是一个工作流主管。
+                根据任务进度决定下一步应该由哪个 Agent 处理。
+                分析对话历史，只返回以下之一：RESEARCH、WRITING、REVIEW、FINISH
+                - RESEARCH：需要收集更多信息
+                - WRITING：信息充足，可以开始写作
+                - REVIEW：写作完成，需要审核
+                - FINISH：任务已完成
+                """)
+
+                response = llm.invoke([system] + state["messages"])
+                return {"messages": [response]}
 
 
             builder = StateGraph(MessagesState)
             builder.add_node("agent", agent_node)
+            builder.add_node("rag", rag_node)
             builder.add_node("tools", ToolNode(all_tools))
+
             builder.add_edge(START, "agent")
+            builder.add_edge("agent", "rag")
             builder.add_conditional_edges("agent", tools_condition)
             builder.add_edge("tools", "agent")
             graph = builder.compile(checkpointer=memory)

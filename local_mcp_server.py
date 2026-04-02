@@ -1,5 +1,9 @@
+from langchain_core import embeddings
 from mcp.server.fastmcp import FastMCP
 from kubernetes import client, config
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.tools import retriever, tool
 
 # 专门为你自定义的探测能力命名的 Server
 mcp = FastMCP("Custom-Ops-Server")
@@ -57,6 +61,21 @@ def list_namespaced_pods(namespace: str) -> str:
         return f"调用 K8s API 发生异常: {e.reason} ({e.status})"
     except Exception as e:
         return f"执行工具时发生未知错误: {str(e)}"
+
+# 加载持久化的知识库
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vector_db = Chroma(persist_directory="./k8s_rag_db", embedding_function=embeddings)
+retriever = vector_db.as_retriever(search_kwargs={"k":3})
+
+@mcp.tool()
+def query_k8s_official_docs(query: str) -> str:
+    """
+    当需要查询 Kubernetes 官方关于排错、资源定义或最佳实践的指南时，调用此工具。
+    输入应为具体的排错问题，例如：'如何排查 Pod 处于 Pending 状态的原因'。
+    """
+    docs = retriever.invoke(query)
+    context = "\n\n".join([f"来自官方文档: {d.page_content}" for d in docs])
+    return context if context else "官方文档中未找到相关内容。"
 
 if __name__ == "__main__":
     mcp.run()
