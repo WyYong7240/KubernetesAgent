@@ -1,21 +1,12 @@
 import asyncio
-from email.message import Message
 import os
 import traceback
-# import logging
-# # 关闭底层的MCP与Agent的通信日志，让终端保持清爽
-# # 屏蔽MCP协议的通信包打印
-# logging.getLogger("mcp").setLevel(logging.WARNING)
-# # 屏蔽HTTP库的请求日志，如果使用了SSE，会有这些信息
-# logging.getLogger("httpx").setLevel(logging.WARNING)
-# # 屏蔽LangChain的冗余调试信息
-# logging.getLogger("langchain").setLevel(logging.WARNING)
+from typing import Literal, TypedDict
 
-from langchain_core.messages.tool import tool_call
 from aioconsole import ainput
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver # 引入内存保存器件
@@ -25,7 +16,6 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from langchain_mcp_adapters.tools import load_mcp_tools
-from urllib3 import response
 
 load_dotenv()
 
@@ -36,7 +26,7 @@ async def main():
     # Server A：你的自定义 Python 脚本
     server_a_params = StdioServerParameters(
         command="python",
-        args=["custom_mcp_server.py"],
+        args=["local_mcp_server.py"],
         env=None
     )
     
@@ -73,8 +63,8 @@ async def main():
             # tools_ks = await load_mcp_tools(session_ks)
             
             # 聚合所有能力
-            all_tools = tools_custom + tools_kube
-            print(f"✅ 成功从 Server 加载了 {len(all_tools)} 个工具！")
+            # all_tools = tools_custom + tools_kube
+            # print(f"✅ 成功从 Server 加载了 {len(all_tools)} 个工具！")
 
 
             # ==========================================
@@ -88,10 +78,38 @@ async def main():
                 openai_api_base=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
                 temperature=0
             )
-            llm_with_tools = llm.bind_tools(all_tools)
 
-            def agent_node(state: MessagesState):
+            class Route(TypedDict):
+                next: Literal["RESEARCH", "OPS", "FINISH"]
+            def supervisor_node(state: MessagesState) -> dict:
+                """主管：大统领，只负责看历史消息并派单，不干脏活"""
+    
+                system_prompt = f"""你是一个 Kubernetes 运维专家团队的主管。
+                根据用户需求和当前对话历史，决定下一步应该交由哪个专家处理。
+
+                【重要指令】：你必须以 JSON 格式输出，且 JSON 中只能包含一个 `next` 字段。
+
+                分析对话历史，只返回以下选项之一：
+                - RESEARCH：需要收集知识、查阅 K8s 官方文档、排错指南或内部 SOP 时。
+                - OPS：信息充足，需要直接操作 K8s 集群（如查Pod、看日志、删资源等）时。
+                - FINISH：用户的提问已经彻底解答，或所需操作已全部完成，需要结束本次排障。
+                """
+                # 强制大模型只输出包含 next 字段的 JSON，完美匹配路由词
+                router_llm = llm.with_structured_output(Route, method="json_mode")
+
+                response = router_llm.invoke(
+                    [SystemMessage(content=system_prompt)] + state["messages"]
+                )
+
+                print(f"\n[主管派单] 🎯 决定将任务交给: {response['next']}")
+
+                # 只需要返回 next 状态，不需要添加 messages，因为主管不直接和用户说话
+                return {"next": response["next"]}
+
+            def ops_node(state: MessagesState) -> dict:
                 """Agent 推理节点：调用 LLM 决定下一步行动，并处理 API 兼容性问题"""
+
+                ops_llm = llm.bind_tools(tools_kube)
 
                 sanitized_message = []
                 for msg in state['messages']:
@@ -114,7 +132,7 @@ async def main():
                         sanitized_message.append(msg)
 
                 # 注入系统提示词，强化它作为 K8s 运维助手的角色
-                SYSTEM_PROMPT = """你是一个资深的高级 Kubernetes 运维专家。
+                SYSTEM_PROMPT = """你是 K8s 运维专员，请使用工具完成主管派发的任务。
                 你的职责是诊断集群异常、分析性能瓶颈并提供修复建议。你已连接到多个 K8s 集群与观测工具链（如 MCP 提供的能力）。
 
                 【排查原则】
@@ -137,45 +155,52 @@ async def main():
                 - 解释故障原因时，请尽量结合底层原理（如 Linux 内核、网络栈、K8s 调度机制）。
                 """
                 # 将系统消息插在对话最前面
-                messages = [SYSTEM_PROMPT] + sanitized_message
-                response = llm_with_tools.invoke(messages)
+                messages = [SystemMessage(content=SYSTEM_PROMPT)] + sanitized_message
+                response = ops_llm.invoke(messages)
     
                 return {"messages": [response]}
             
             def rag_node(state: MessagesState):
+
+                rag_llm = llm.bind_tools(tools_custom)
+
                 RAG_PROMPT = """你是一个严谨的 Kubernetes 文档研究员。
                 你的任务是使用 k8s_doc_retriever 工具查阅官方文档，并针对用户的报错或疑问，提取出最核心的排查步骤或修复建议。
                 注意：
                 1. 你的总结必须简明扼要，控制在 300 字以内。
                 2. 只输出干货，不要说废话。
                 """
-                response = llm.invoke([RAG_PROMPT] + state["messages"])
+                response = rag_llm.invoke([SystemMessage(content=RAG_PROMPT)] + state["messages"])
                 return {"message": [response]}
             
-            def supervisor_node(state: MessagesState) -> dict:
-                """主管：协调各专家 Agent 的工作"""
-                system = SystemMessage(content="""你是一个工作流主管。
-                根据任务进度决定下一步应该由哪个 Agent 处理。
-                分析对话历史，只返回以下之一：RESEARCH、WRITING、REVIEW、FINISH
-                - RESEARCH：需要收集更多信息
-                - WRITING：信息充足，可以开始写作
-                - REVIEW：写作完成，需要审核
-                - FINISH：任务已完成
-                """)
 
-                response = llm.invoke([system] + state["messages"])
-                return {"messages": [response]}
-
-
+            # 注册节点
             builder = StateGraph(MessagesState)
-            builder.add_node("agent", agent_node)
-            builder.add_node("rag", rag_node)
-            builder.add_node("tools", ToolNode(all_tools))
+            builder.add_node("supervisor", supervisor_node)
+            builder.add_node("OPS", ops_node)
+            builder.add_node("RESEARCH", rag_node)
 
-            builder.add_edge(START, "agent")
-            builder.add_edge("agent", "rag")
-            builder.add_conditional_edges("agent", tools_condition)
-            builder.add_edge("tools", "agent")
+
+            # 2. 定义控制流
+            # 每次开始都先找主管
+            builder.add_edge(START, "supervisor")
+
+            # 主管根据 state["next"] 的值决定走哪条路
+            builder.add_conditional_edges(
+                "supervisor",
+                lambda state: state["next"],
+                {
+                    "OPS": "OPS",
+                    "RESEARCH": "RESEARCH",
+                    "FINISH": END
+                }
+            )
+
+            # 员工干完活后，必须无条件向主管汇报（跳回主管节点，由主管决定是继续还是结束）
+            builder.add_edge("OPS", "supervisor")
+            builder.add_edge("RESEARCH", "supervisor")
+
+            # 3. 编译图
             graph = builder.compile(checkpointer=memory)
 
             # 4. 进入循环提问环节
