@@ -1,5 +1,19 @@
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+import sys
+import logging
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+from langchain_core import embeddings
 from mcp.server.fastmcp import FastMCP
 from kubernetes import client, config
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.tools import retriever, tool
 
 # 专门为你自定义的探测能力命名的 Server
 mcp = FastMCP("Custom-Ops-Server")
@@ -12,13 +26,13 @@ def init_k8s_client():
     try:
         # 因为你在 master 节点，通常可以直接加载 ~/.kube/config
         config.load_kube_config()
-        print("✅ 成功加载 kubeconfig 配置文件。")
+        logging.info("✅ 成功加载 kubeconfig 配置文件。")
     except Exception as e:
-        print(f"⚠️ 加载 kubeconfig 失败，尝试 In-Cluster 模式: {e}")
+        logging.info(f"⚠️ 加载 kubeconfig 失败，尝试 In-Cluster 模式: {e}")
         try:
             # 如果你以后把它打包成 Pod 运行在集群内，会 fallback 到这里
             config.load_incluster_config()
-            print("✅ 成功加载 In-Cluster 配置。")
+            logging.info("✅ 成功加载 In-Cluster 配置。")
         except Exception as inner_e:
             raise RuntimeError(f"❌ 无法初始化 Kubernetes 客户端: {inner_e}")
 
@@ -32,7 +46,7 @@ def list_namespaced_pods(namespace: str) -> str:
     必须传入指定的 namespace 名称。如果用户没有指定，默认使用 'default'。
     """
     try:
-        print(f"\n🔧 [Tool Execution] 正在调用 K8s API 获取 '{namespace}' 命名空间的 Pods...")
+        logging.info(f"\n🔧 [Tool Execution] 正在调用 K8s API 获取 '{namespace}' 命名空间的 Pods...")
         pods = v1.list_namespaced_pod(namespace=namespace)
         
         if not pods.items:
@@ -58,5 +72,20 @@ def list_namespaced_pods(namespace: str) -> str:
     except Exception as e:
         return f"执行工具时发生未知错误: {str(e)}"
 
+# 加载持久化的知识库
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vector_db = Chroma(persist_directory="./k8s_rag_db", embedding_function=embeddings)
+retriever = vector_db.as_retriever(search_kwargs={"k":3})
+
+@mcp.tool()
+def query_k8s_official_docs(query: str) -> str:
+    """
+    当需要查询 Kubernetes 官方关于排错、资源定义或最佳实践的指南时，调用此工具。
+    输入应为具体的排错问题，例如：'如何排查 Pod 处于 Pending 状态的原因'。
+    """
+    docs = retriever.invoke(query)
+    context = "\n\n".join([f"来自官方文档: {d.page_content}" for d in docs])
+    return context if context else "官方文档中未找到相关内容。"
+
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport='stdio')
