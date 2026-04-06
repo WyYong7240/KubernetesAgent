@@ -88,4 +88,4 @@ def query_k8s_official_docs(query: str) -> str:
     return context if context else "官方文档中未找到相关内容。"
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport='stdio')

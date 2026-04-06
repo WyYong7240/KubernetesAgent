@@ -19,6 +19,9 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 load_dotenv()
 
+class AgentState(MessagesState):
+    next: str
+
 async def main():
     # ==========================================
     # 1. 定义两个 Server 的启动参数
@@ -79,9 +82,34 @@ async def main():
                 temperature=0
             )
 
+            def sanitize_messages(messages: list) -> list:
+                """
+                无副作用的数据清洗逻辑：重建 ToolMessage，兼容 DeepSeek/OpenAI
+                """
+                sanitized_messages = []
+                for msg in messages:
+                    if isinstance(msg, ToolMessage) and isinstance(msg.content, list):
+                        extracted_text = ""
+                        for block in msg.content:
+                            if isinstance(block, dict) and "text" in block:
+                                extracted_text += block["text"]
+                            else:
+                                extracted_text += str(block)
+
+                        sanitized_msg = ToolMessage(
+                            content=extracted_text,
+                            name=msg.name,
+                            tool_call_id=msg.tool_call_id
+                        )
+                        sanitized_messages.append(sanitized_msg)
+                    else:
+                        sanitized_messages.append(msg)
+
+                return sanitized_messages
+
             class Route(TypedDict):
-                next: Literal["RESEARCH", "OPS", "FINISH"]
-            def supervisor_node(state: MessagesState) -> dict:
+                next: Literal["RESEARCH", "OPS", "CHAT", "FINISH"]
+            def supervisor_node(state: AgentState) -> dict:
                 """主管：大统领，只负责看历史消息并派单，不干脏活"""
     
                 system_prompt = f"""你是一个 Kubernetes 运维专家团队的主管。
@@ -92,13 +120,18 @@ async def main():
                 分析对话历史，只返回以下选项之一：
                 - RESEARCH：需要收集知识、查阅 K8s 官方文档、排错指南或内部 SOP 时。
                 - OPS：信息充足，需要直接操作 K8s 集群（如查Pod、看日志、删资源等）时。
-                - FINISH：用户的提问已经彻底解答，或所需操作已全部完成，需要结束本次排障。
+                - CHAT：当用户只是在进行日常问候（如“你好”、“在吗”），或者提出完全不需要工具就能回答的常识性问题时。
+                - FINISH：
+                    1. 用户的提问已经得到了完整的解答。
+                    2. 对话历史中的最后一条消息是 AI 发出的（例如 AI 正在向用户打招呼、或者 AI 正在反问用户以获取更多信息），此时必须选择 FINISH，暂停系统内部流转，等待用户的真实回答。
+                    3. 用户只是在进行日常问候或闲聊（如“你好”、“在吗”）。
                 """
                 # 强制大模型只输出包含 next 字段的 JSON，完美匹配路由词
                 router_llm = llm.with_structured_output(Route, method="json_mode")
 
+                clean_message = sanitize_messages(state["messages"])
                 response = router_llm.invoke(
-                    [SystemMessage(content=system_prompt)] + state["messages"]
+                    [SystemMessage(content=system_prompt)] + clean_message
                 )
 
                 print(f"\n[主管派单] 🎯 决定将任务交给: {response['next']}")
@@ -106,30 +139,8 @@ async def main():
                 # 只需要返回 next 状态，不需要添加 messages，因为主管不直接和用户说话
                 return {"next": response["next"]}
 
-            def ops_node(state: MessagesState) -> dict:
+            def ops_node(state: AgentState) -> dict:
                 """Agent 推理节点：调用 LLM 决定下一步行动，并处理 API 兼容性问题"""
-
-                ops_llm = llm.bind_tools(tools_kube)
-
-                sanitized_message = []
-                for msg in state['messages']:
-                    # 拦截ToolMessage， 如果其内容是列表内容，将其提取为纯字符串，用以兼容DeepSeek等OpenAI的接口需求
-                    if isinstance(msg, ToolMessage) and isinstance(msg.content, list):
-                        extracted_text = ""
-                        for block in msg.content:
-                            if isinstance(block, dict) and "text" in block:
-                                extracted_text += block["text"]
-                            else:
-                                extracted_text += str(block)
-                        # 用提取出的纯文本重构一条兼容接口的ToolMessage
-                        sanitized_msg = ToolMessage(
-                            content=extracted_text,
-                            name=msg.name,
-                            tool_call_id = msg.tool_call_id
-                        )
-                        sanitized_message.append(sanitized_msg)
-                    else:
-                        sanitized_message.append(msg)
 
                 # 注入系统提示词，强化它作为 K8s 运维助手的角色
                 SYSTEM_PROMPT = """你是 K8s 运维专员，请使用工具完成主管派发的任务。
@@ -154,31 +165,76 @@ async def main():
                 - 在最终回复用户时，请使用清晰的 Markdown 格式（如表格、代码块）呈现数据。
                 - 解释故障原因时，请尽量结合底层原理（如 Linux 内核、网络栈、K8s 调度机制）。
                 """
+
+                ops_llm = llm.bind_tools(tools_kube)
+
                 # 将系统消息插在对话最前面
-                messages = [SystemMessage(content=SYSTEM_PROMPT)] + sanitized_message
+                clean_message = sanitize_messages(state["messages"])
+                messages = [SystemMessage(content=SYSTEM_PROMPT)] + clean_message
                 response = ops_llm.invoke(messages)
     
                 return {"messages": [response]}
+
+            def route_after_ops(state: AgentState) -> Literal["ops_tools", "supervisor"]:
+                """判断 OPS 专员是否请求了工具"""
+                messages = state["messages"]
+                last_message = messages[-1]
+
+                # 如果最后一条消息包含 tool_calls，说明大模型想用工具，必须去执行！
+                if hasattr(last_message, 'tool_calls') and len(last_message.tool_calls) > 0:
+                    print("[流转日志] 🛠️ OPS 专员正在执行 K8s 工具...")
+                    return "ops_tools"
+
+                # 如果没有 tool_calls，说明专员已经得出结论，直接向主管汇报
+                print("[流转日志] 📝 OPS 专员操作完毕，向主管汇报。")
+                return "supervisor"
             
-            def rag_node(state: MessagesState):
-
-                rag_llm = llm.bind_tools(tools_custom)
-
+            def rag_node(state: AgentState):
                 RAG_PROMPT = """你是一个严谨的 Kubernetes 文档研究员。
                 你的任务是使用 k8s_doc_retriever 工具查阅官方文档，并针对用户的报错或疑问，提取出最核心的排查步骤或修复建议。
                 注意：
                 1. 你的总结必须简明扼要，控制在 300 字以内。
                 2. 只输出干货，不要说废话。
                 """
-                response = rag_llm.invoke([SystemMessage(content=RAG_PROMPT)] + state["messages"])
+                rag_llm = llm.bind_tools(tools_custom)
+
+                clean_message = sanitize_messages(state["messages"])
+                response = rag_llm.invoke([SystemMessage(content=RAG_PROMPT)] + clean_message)
                 return {"message": [response]}
-            
+
+            def route_after_rag(state: AgentState) -> Literal["rag_tools", "supervisor"]:
+                """判断 RAG 专员是否请求了工具"""
+                messages = state["messages"]
+                last_message = messages[-1]
+
+                # 如果最后一条消息包含 tool_calls，说明大模型想用工具，必须去执行！
+                if hasattr(last_message, 'tool_calls') and len(last_message.tool_calls) > 0:
+                    print("[流转日志] 🛠️ RAG 专员正在执行 RAG 工具...")
+                    return "rag_tools"
+
+                # 如果没有 tool_calls，说明专员已经得出结论，直接向主管汇报
+                print("[流转日志] 📝 RAG 专员操作完毕，向主管汇报。")
+                return "supervisor"
+
+            def chat_node(state: AgentState) -> dict:
+                """接待员：没有绑定任何工具，只负责用大模型的常识和用户友好地闲聊"""
+    
+                # 这里不需要绑定 bind_tools，直接用普通的 llm
+                sys_msg = SystemMessage(content="你是 K8s 运维团队的 AI 助理。请用简短、友好的语言回复用户的问候或闲聊。不要使用任何 Markdown 表格。")
+    
+                response = llm.invoke([sys_msg] + state["messages"])
+    
+                return {"messages": [response]}
+
 
             # 注册节点
-            builder = StateGraph(MessagesState)
+            builder = StateGraph(AgentState)
             builder.add_node("supervisor", supervisor_node)
             builder.add_node("OPS", ops_node)
+            builder.add_node("CHAT", chat_node)
             builder.add_node("RESEARCH", rag_node)
+            builder.add_node("ops_tools", ToolNode(tools_kube))
+            builder.add_node("rag_tools", ToolNode(tools_custom))
 
 
             # 2. 定义控制流
@@ -192,13 +248,26 @@ async def main():
                 {
                     "OPS": "OPS",
                     "RESEARCH": "RESEARCH",
+                    "CHAT": "CHAT",
                     "FINISH": END
                 }
             )
 
             # 员工干完活后，必须无条件向主管汇报（跳回主管节点，由主管决定是继续还是结束）
-            builder.add_edge("OPS", "supervisor")
-            builder.add_edge("RESEARCH", "supervisor")
+            # builder.add_edge("OPS", "supervisor")
+            # 替换为条件路由：OPS 思考完后，根据情况决定是去用工具，还是找主管
+            builder.add_conditional_edges(
+                "OPS",
+                route_after_ops
+            )
+            # builder.add_edge("RESEARCH", "supervisor")
+            builder.add_conditional_edges(
+                "RESEARCH",
+                route_after_rag 
+            )
+            builder.add_edge("CHAT", "supervisor")
+            builder.add_edge("ops_tools", "OPS")
+            builder.add_edge("rag_tools", "RESEARCH")
 
             # 3. 编译图
             graph = builder.compile(checkpointer=memory)
