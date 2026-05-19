@@ -7,6 +7,7 @@ from typing import Literal, TypedDict
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
+from langchain_deepseek import ChatDeepSeek
 from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -75,6 +76,12 @@ async def lifespan(app: FastAPI):
                 openai_api_base=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
                 temperature=0
             )
+            # llm = ChatDeepSeek(
+            #     model=os.getenv('DEEPSEEK_MODEL', 'deepseek-chat'),
+            #     openai_api_key=os.getenv('DEEPSEEK_API_KEY'),
+            #     openai_api_base=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
+            #     temperature=0
+            # )
 
             def sanitize_messages(messages: list) -> list:
                 """
@@ -137,6 +144,17 @@ async def lifespan(app: FastAPI):
                     # 【核心】：如果大模型胡言乱语导致 JSON 解析失败，默认切给 CHAT 节点（接待员），
                     # 让接待员去跟用户说“抱歉我没听懂”，防止整个后端 500 崩溃
                     next_action = "CHAT" 
+
+                # ==========================================
+                # 🛡️ 新增：防摸鱼绝对防御层
+                # ==========================================
+                last_msg = state["messages"][-1]
+    
+                # 如果最后一条消息是用户发的，并且主管试图直接 FINISH 结束工作
+                if next_action == "FINISH" and isinstance(last_msg, HumanMessage):
+                    print("\n[系统纠正] 🛡️ 拦截到主管试图直接结束未处理的任务，强行重定向至接待员(CHAT)。")
+                    next_action = "CHAT"
+                # ==========================================
         
                 print(f"\n[主管派单] 🎯 决定将任务交给: {next_action}")
     
@@ -241,7 +259,6 @@ async def lifespan(app: FastAPI):
             builder.add_node("ops_tools", ToolNode(tools_kube))
             builder.add_node("rag_tools", ToolNode(tools_local))
 
-
             # 2. 定义控制流
             # 每次开始都先找主管
             builder.add_edge(START, "supervisor")
@@ -270,7 +287,8 @@ async def lifespan(app: FastAPI):
                 "RESEARCH",
                 route_after_rag 
             )
-            builder.add_edge("CHAT", "supervisor")
+            # builder.add_edge("CHAT", "supervisor")
+            builder.add_edge("CHAT", END)
             builder.add_edge("ops_tools", "OPS")
             builder.add_edge("rag_tools", "RESEARCH")
 

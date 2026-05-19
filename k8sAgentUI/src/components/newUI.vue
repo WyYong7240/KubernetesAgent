@@ -1,6 +1,6 @@
 <template>
   <div class="app-container">
-    <aside class="sidebar no-print">
+    <aside class="sidebar">
       <div class="sidebar-header">
         <div class="logo-area">
           <span class="icon">☸️</span>
@@ -47,16 +47,21 @@
     </aside>
 
     <main class="main-workspace">
-      <header class="workspace-header no-print">
+      <header class="workspace-header">
         <div class="current-chat-info">
           <span class="thread-badge">ID: {{ currentThreadId.substring(0, 8) }}...</span>
         </div>
         
         <div class="header-right-zone">
           <div class="export-group">
-            <button class="action-btn" @click="exportToMarkdown" title="导出为 Markdown 文档">📝 导出 MD</button>
-            <button class="action-btn" @click="exportToPDF" title="导出为 PDF 报表">📄 导出 PDF</button>
+            <button class="action-btn" @click="exportToMarkdown" title="导出为 Markdown 文档">
+              📝 导出 MD
+            </button>
+            <button class="action-btn" @click="exportToPDF" title="导出为 PDF 报表">
+              📄 导出 PDF
+            </button>
           </div>
+          
           <div class="status-indicator">
             <div class="dot" :class="{ 'is-online': isConnected }"></div>
             <span>{{ isConnected ? 'Agent 在线' : '连接中...' }}</span>
@@ -73,7 +78,7 @@
           >
             <div class="avatar">{{ msg.role === 'user' ? '🧑‍💻' : '🤖' }}</div>
             <div class="message-content">
-              <div class="message-sender">{{ msg.role === 'user' ? (msg.name || 'User') : 'K8s Agent' }}</div>
+              <div class="message-sender">{{ msg.role === 'user' ? 'You' : 'K8s Agent' }}</div>
               <div 
                 v-if="msg.role === 'ai'" 
                 class="markdown-body" 
@@ -99,8 +104,8 @@
         <div class="input-container">
           <textarea 
             v-model="inputText" 
-            @keydown.enter.prevent="sendMessage()"
-            placeholder="输入 K8s 排障需求，或从右侧选择预设问题..."
+            @keydown.enter.prevent="sendMessage"
+            placeholder="输入 K8s 排障需求，例如：查一下 default 命名空间的 Pod 状态..."
             :disabled="isLoading"
             rows="1"
             @input="autoResize"
@@ -108,7 +113,7 @@
           ></textarea>
           <button 
             class="send-btn" 
-            @click="sendMessage()" 
+            @click="sendMessage" 
             :disabled="isLoading || !inputText.trim()"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -120,68 +125,6 @@
         <div class="footer-tip">Powered by LangGraph & MCP K8s Server</div>
       </footer>
     </main>
-
-    <aside class="right-sidebar no-print">
-      <div class="config-section">
-        <h3 class="section-title">💡 预设指令</h3>
-        <div class="preset-list">
-          <div 
-            v-for="(question, index) in presetQuestions" 
-            :key="index"
-            class="preset-item-wrapper"
-          >
-            <button 
-              class="preset-btn"
-              @click="sendPreset(question)"
-              :disabled="isLoading"
-            >
-              {{ question }}
-            </button>
-            <button class="del-preset-btn" @click.stop="deletePreset(question)">×</button>
-          </div>
-        </div>
-        
-        <div class="add-user-area" style="margin-top: 12px;">
-          <input 
-            type="text" 
-            v-model="newPreset" 
-            placeholder="添加新预设指令..." 
-            @keydown.enter="addPreset"
-          />
-          <button @click="addPreset">+</button>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="config-section">
-        <h3 class="section-title">👤 操作人身份</h3>
-        
-        <div class="user-list">
-          <label 
-            v-for="user in userList" 
-            :key="user" 
-            class="user-radio"
-            :class="{ active: currentUser === user }"
-          >
-            <input type="radio" :value="user" v-model="currentUser" name="userSelect" />
-            <span class="radio-custom"></span>
-            {{ user }}
-            <span v-if="user !== 'Admin'" class="del-user" @click.prevent="deleteUser(user)">×</span>
-          </label>
-        </div>
-
-        <div class="add-user-area">
-          <input 
-            type="text" 
-            v-model="newUserName" 
-            placeholder="添加新操作人..." 
-            @keydown.enter="addCustomUser"
-          />
-          <button @click="addCustomUser">+</button>
-        </div>
-      </div>
-    </aside>
   </div>
 </template>
 
@@ -201,14 +144,11 @@ marked.setOptions({
   gfm: true     
 });
 
-// --- 常量与 Storage ---
+// --- 状态管理 ---
 const LOCAL_STORAGE_KEY = 'k8s_agent_chat_history';
-const USER_STORAGE_KEY = 'k8s_agent_users';
-const PRESET_STORAGE_KEY = 'k8s_agent_presets'; // 🌟 新增预设 Storage Key
 const generateThreadId = () => 'chat_' + Math.random().toString(36).substring(2, 9);
 const defaultGreeting = { role: 'ai', content: '你好！我是你的 Kubernetes 运维智能体。有什么可以帮你的？' };
 
-// --- 状态管理 ---
 const chatHistory = ref({});
 const currentThreadId = ref('');
 const inputText = ref('');
@@ -217,20 +157,6 @@ const isConnected = ref(true);
 const messagesContainer = ref(null);
 const textareaRef = ref(null);
 
-// 右侧栏状态
-const presetQuestions = ref([
-  "帮我检查 default 命名空间下所有报错的 Pod",
-  "查看 kube-system 组件的健康状态",
-  "创建一个 Nginx 测试服务暴露 80 端口",
-  "获取当前集群的 Node 节点资源利用率"
-]);
-const newPreset = ref(''); // 🌟 新增绑定
-
-const userList = ref(['Admin']);
-const currentUser = ref('Admin');
-const newUserName = ref('');
-
-// --- 初始化与持久化 ---
 onMounted(() => {
   const storedHistory = localStorage.getItem(LOCAL_STORAGE_KEY);
   if (storedHistory) {
@@ -244,20 +170,6 @@ onMounted(() => {
   } else {
     startNewChat();
   }
-  
-  const storedUsers = localStorage.getItem(USER_STORAGE_KEY);
-  if (storedUsers) {
-    const parsed = JSON.parse(storedUsers);
-    userList.value = parsed.list;
-    currentUser.value = parsed.current;
-  }
-
-  // 🌟 恢复自定义预设指令
-  const storedPresets = localStorage.getItem(PRESET_STORAGE_KEY);
-  if (storedPresets) {
-    presetQuestions.value = JSON.parse(storedPresets);
-  }
-  
   scrollToBottom();
 });
 
@@ -265,33 +177,23 @@ watch(chatHistory, (newVal) => {
   localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(newVal));
 }, { deep: true });
 
-watch([userList, currentUser], () => {
-  localStorage.setItem(USER_STORAGE_KEY, JSON.stringify({
-    list: userList.value,
-    current: currentUser.value
-  }));
-}, { deep: true });
-
-// 🌟 监听保存自定义预设
-watch(presetQuestions, (newVal) => {
-  localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(newVal));
-}, { deep: true });
-
-
-// --- 核心方法 ---
 const currentMessages = computed(() => {
   return chatHistory.value[currentThreadId.value] || [];
 });
 
+// 🌟 1. 优化对话名称获取逻辑（去除前后空格）
 const getChatTitle = (msgs) => {
   const firstUserMsg = msgs.find(m => m.role === 'user');
   if (firstUserMsg) {
     const content = firstUserMsg.content.trim();
-    return content.length > 14 ? content.substring(0, 14) + '...' : content;
+    return content.length > 14 
+      ? content.substring(0, 14) + '...' 
+      : content;
   }
   return '全新的对话';
 };
 
+// 🌟 2. 优化时间戳格式：生成符合你要求的 YYYY-MM-DD__HH-mm-ss（用下划线替代无法在文件名中使用的冒号）
 const getSafeTimestamp = () => {
   const now = new Date();
   const YYYY = now.getFullYear();
@@ -303,33 +205,29 @@ const getSafeTimestamp = () => {
   return `${YYYY}-${MM}-${DD}__${HH}-${mm}-${ss}`;
 };
 
+// 🌟 3. 辅助函数：清洗对话名称，使其可以安全地作为 Windows/Linux/macOS 的文件名
 const getSafeFileNameTitle = () => {
   const rawTitle = getChatTitle(currentMessages.value);
   if (rawTitle === '全新的对话') return 'K8s_Report';
+  // 正则过滤掉文件名中不允许出现的字符：\ / : * ? " < > | 以及空格
   return rawTitle.replace(/[\\/:*?"<>|\s]/g, '_');
 };
 
-// 🌟 提取当前操作员的安全名称（过滤掉可能的非法符号）
-const getSafeOperatorName = () => {
-  return currentUser.value.replace(/[\\/:*?"<>|\s]/g, '_');
-};
-
+// 🌟 4. 动态命名导出为 Markdown
 const exportToMarkdown = () => {
   if (currentMessages.value.length <= 1) return;
+  
   const fileTitle = getSafeFileNameTitle();
-  const safeOperator = getSafeOperatorName(); // 获取操作员
   const displayTitle = getChatTitle(currentMessages.value);
   
   let mdContent = `# K8s 运维排障报告 - ${displayTitle}\n\n`;
   mdContent += `- **会话 ID:** \`${currentThreadId.value}\`\n`;
-  mdContent += `- **操作人员:** ${currentUser.value}\n`;
   mdContent += `- **导出时间:** ${new Date().toLocaleString()}\n\n`;
   mdContent += `---\n\n`;
 
   currentMessages.value.forEach(msg => {
     if (msg.role === 'user') {
-      const uName = msg.name || 'User';
-      mdContent += `### 🧑‍💻 [${uName}]\n\n> ${msg.content}\n\n`;
+      mdContent += `### 🧑‍💻 User\n\n> ${msg.content}\n\n`;
     } else {
       mdContent += `### 🤖 K8s Agent\n\n${msg.content}\n\n`;
     }
@@ -340,57 +238,25 @@ const exportToMarkdown = () => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  // 🌟 拼装：标题_操作员_时间戳
-  link.download = `${fileTitle}_${safeOperator}_${getSafeTimestamp()}.md`;
+  
+  // 核心改动：文件名带上实际对话名称和精确时间戳
+  link.download = `${fileTitle}_${getSafeTimestamp()}.md`;
   link.click();
   URL.revokeObjectURL(url);
 };
 
+// 🌟 5. 动态命名导出为 PDF
 const exportToPDF = () => {
   const fileTitle = getSafeFileNameTitle();
-  const safeOperator = getSafeOperatorName(); // 获取操作员
   const originalTitle = document.title;
-  // 🌟 拼装：标题_操作员_时间戳
-  document.title = `${fileTitle}_${safeOperator}_${getSafeTimestamp()}`;
+  
+  // 核心改动：动态修改浏览器 title，从而强行改变浏览器打印另存为 PDF 时的默认文件名
+  document.title = `${fileTitle}_${getSafeTimestamp()}`;
+  
   window.print();
+  
+  // 打印流结束后，悄悄还原页面原本的 Title
   document.title = originalTitle;
-};
-
-// --- 右侧栏逻辑 ---
-const sendPreset = (question) => {
-  if (isLoading.value) return;
-  inputText.value = question;
-  sendMessage();
-};
-
-// 🌟 添加预设
-const addPreset = () => {
-  const text = newPreset.value.trim();
-  if (text && !presetQuestions.value.includes(text)) {
-    presetQuestions.value.push(text);
-  }
-  newPreset.value = '';
-};
-
-// 🌟 删除预设
-const deletePreset = (question) => {
-  presetQuestions.value = presetQuestions.value.filter(q => q !== question);
-};
-
-const addCustomUser = () => {
-  const name = newUserName.value.trim();
-  if (name && !userList.value.includes(name)) {
-    userList.value.push(name);
-    currentUser.value = name; 
-  }
-  newUserName.value = '';
-};
-
-const deleteUser = (name) => {
-  userList.value = userList.value.filter(u => u !== name);
-  if (currentUser.value === name) {
-    currentUser.value = userList.value[0]; 
-  }
 };
 
 const startNewChat = () => {
@@ -451,14 +317,9 @@ const sendMessage = async () => {
   if (!chatHistory.value[currentThreadId.value]) {
     chatHistory.value[currentThreadId.value] = [];
   }
-  
-  chatHistory.value[currentThreadId.value].push({ 
-    role: 'user', 
-    name: currentUser.value, 
-    content: text 
-  });
-  
+  chatHistory.value[currentThreadId.value].push({ role: 'user', content: text });
   resetInput();
+  
   isLoading.value = true;
   scrollToBottom();
 
@@ -610,41 +471,4 @@ textarea { flex: 1; min-height: 24px; max-height: 200px; padding: 12px 16px; bac
 .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
 .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
 @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-
-/* --- 右侧栏 --- */
-.right-sidebar { width: 260px; background-color: #fafafa; border-left: 1px solid #e2e8f0; display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; padding: 20px 0; }
-.config-section { padding: 0 20px; margin-bottom: 24px; }
-.section-title { font-size: 13px; color: #64748b; font-weight: 600; margin-top: 0; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.5px; }
-.divider { height: 1px; background-color: #e2e8f0; margin: 0 20px 24px 20px; }
-
-/* 🌟 预设问题区更新 */
-.preset-list { display: flex; flex-direction: column; gap: 10px; }
-.preset-item-wrapper { position: relative; display: flex; align-items: stretch; }
-.preset-btn { flex: 1; text-align: left; background: #ffffff; border: 1px solid #e2e8f0; padding: 10px 32px 10px 12px; border-radius: 8px; font-size: 13px; color: #334155; cursor: pointer; transition: all 0.2s; line-height: 1.4; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
-.preset-btn:hover:not(:disabled) { border-color: #3b82f6; color: #3b82f6; box-shadow: 0 2px 4px rgba(59, 130, 246, 0.1); transform: translateY(-1px); }
-.preset-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.del-preset-btn { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: transparent; border: none; color: #94a3b8; font-size: 16px; cursor: pointer; opacity: 0; transition: opacity 0.2s; }
-.preset-item-wrapper:hover .del-preset-btn { opacity: 1; }
-.del-preset-btn:hover { color: #ef4444; font-weight: bold; }
-
-/* 用户设置区 */
-.user-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
-.user-radio { display: flex; align-items: center; gap: 10px; font-size: 14px; color: #334155; cursor: pointer; padding: 8px 12px; border-radius: 6px; transition: background 0.2s; position: relative; }
-.user-radio:hover { background: #f1f5f9; }
-.user-radio.active { background: #eff6ff; color: #1d4ed8; font-weight: 500; }
-.user-radio input { display: none; }
-.radio-custom { width: 14px; height: 14px; border: 2px solid #cbd5e1; border-radius: 50%; position: relative; }
-.user-radio.active .radio-custom { border-color: #3b82f6; }
-.user-radio.active .radio-custom::after { content: ''; position: absolute; width: 8px; height: 8px; background: #3b82f6; border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%); }
-
-.del-user { position: absolute; right: 12px; font-size: 16px; color: #94a3b8; opacity: 0; transition: opacity 0.2s; }
-.user-radio:hover .del-user { opacity: 1; }
-.del-user:hover { color: #ef4444; font-weight: bold; }
-
-.add-user-area { display: flex; gap: 8px; }
-.add-user-area input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; outline: none; }
-.add-user-area input:focus { border-color: #3b82f6; }
-.add-user-area button { width: 32px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px; color: #475569; cursor: pointer; transition: all 0.2s; }
-.add-user-area button:hover { background: #e2e8f0; color: #0f172a; }
 </style>
