@@ -46,13 +46,12 @@ pip install fastapi uvicorn langchain-openai langgraph mcp langchain-mcp-adapter
 
 ### 2. 配置文件
 
-在根目录下创建 `.env` 文件：
-
-```env
-DEEPSEEK_API_KEY="your-api-key"
-DEEPSEEK_BASE_URL="https://api.deepseek.com"
-DEEPSEEK_MODEL="deepseek-chat"
+```bash
+# 复制模板文件并填入你的真实 API Key
+cp .env.example .env
 ```
+
+然后编辑 `.env`，将 `sk-xxx` 替换为你的真实 API Key。
 
 ### 3. 启动服务
 
