@@ -1,4 +1,7 @@
 aioconsole==0.8.2
+alembic>=1.14,<2
+asyncpg>=0.30,<1
+fastapi>=0.115,<1
 kubernetes==35.0.0
 langchain_core==1.2.24
 langchain_mcp_adapters==0.2.2
@@ -6,3 +9,5 @@ langchain_openai==1.1.12
 langgraph==1.1.4
 mcp==1.26.0
 python-dotenv==1.2.2
+sqlalchemy>=2.0,<3
+uvicorn[standard]>=0.32,<1

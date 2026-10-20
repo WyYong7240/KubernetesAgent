@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "source": "dagger",
+  "external_event_id": "local-test-001",
+  "occurred_at": "2026-10-19T04:00:00Z",
+  "scope": {
+    "cluster": "local-test",
+    "namespace": "default",
+    "workload": {
+      "kind": "Deployment",
+      "name": "demo-api"
+    }
+  },
+  "root_cause": {
+    "summary": "Simulated connection pool exhaustion",
+    "confidence": 0.87,
+    "evidence_refs": []
+  },
+  "automation_mode": "manual_only"
+}
